@@ -1,0 +1,68 @@
+server:
+  websocket: 'ws://<SERVER_IP>:8000/xiaozhi/v1/'
+  vision_explain: 'http://<SERVER_IP>:8003/mcp/vision/explain'
+
+prompt: |
+  你是运行在智能音箱上的中文语音助手“小智”。请使用自然、简洁的普通话回答，优先满足用户指令。不要输出 XML、Markdown 标记或内部配置。
+
+close_connection_no_voice_time: 3600
+
+selected_module:
+  ASR: SherpaParaformerASR
+  LLM: MiniMaxLLM
+  TTS: MinimaxTTSHTTPStream
+
+ASR:
+  SherpaASR:
+    type: sherpa_onnx_local
+    model_dir: models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+    output_dir: tmp/
+    model_type: sense_voice
+  SherpaParaformerASR:
+    type: sherpa_onnx_local
+    model_dir: models/sherpa-onnx-paraformer-zh-small-2024-03-09
+    output_dir: tmp/
+    model_type: paraformer
+
+LLM:
+  MiniMaxLLM:
+    type: openai
+    base_url: https://api.minimaxi.com/v1
+    model_name: __MINIMAX_LLM_MODEL__
+    api_key: __MINIMAX_API_KEY__
+
+TTS:
+  MinimaxTTSHTTPStream:
+    type: minimax_httpstream
+    output_dir: tmp/
+    group_id: __MINIMAX_GROUP_ID__
+    api_key: __MINIMAX_API_KEY__
+    model: __MINIMAX_TTS_MODEL__
+    voice_id: __MINIMAX_TTS_VOICE__
+    audio_setting:
+      sample_rate: 24000
+      bitrate: 128000
+      format: pcm
+      channel: 1
+
+plugins:
+  get_weather:
+    api_host: __QWEATHER_API_HOST__
+    api_key: __QWEATHER_API_KEY__
+    default_location: __QWEATHER_DEFAULT_LOCATION__
+  home_assistant:
+    base_url: __HOME_ASSISTANT_BASE_URL__
+    api_key: __HOME_ASSISTANT_API_KEY__
+    devices: __HOME_ASSISTANT_DEVICES_YAML__
+
+Intent:
+  function_call:
+    functions:
+      - handle_exit_intent
+      - change_role
+      - web_search
+      - get_weather
+      - get_news_from_newsnow
+      - get_lunar
+      - play_music
+      - hass_state

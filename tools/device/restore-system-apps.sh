@@ -1,0 +1,9 @@
+adb shell pm install-existing --user 0 com.miui.hybrid.soundbox
+adb shell pm install-existing --user 0 com.xiaomi.mico.appstore
+adb shell pm install-existing --user 0 com.youku.iot
+adb shell pm install-existing --user 0 com.tencent.qqlive.audiobox
+adb shell pm install-existing --user 0 com.qiyi.video.speaker
+adb shell pm install-existing --user 0 com.xiaomi.mico.feedback
+adb shell pm install-existing --user 0 com.xiaomi.mico.gallery
+adb shell pm install-existing --user 0 com.xiaomi.mico.screensaver
+adb shell pm install-existing --user 0 com.xiaoxun.xun

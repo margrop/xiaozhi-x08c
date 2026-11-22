@@ -1,0 +1,42 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+app/.cxx/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Local SDK paths and IDE state
+local.properties
+.idea/
+*.iml
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets and signing material
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+*.env
+!*.env.example
+
+# Generated binaries and local artifacts
+dist/
+artifacts/
+*.apk
+*.aab
+*.idsig
+
+# Xiaozhi server runtime data and models
+server/data/.config.yaml
+server/models/
+
+# Python cache
+__pycache__/
+*.py[cod]

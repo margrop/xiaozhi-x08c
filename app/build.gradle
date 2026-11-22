@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.xiaozhi.x08c'
+    compileSdk 35
+    ndkVersion '26.3.11579264'
+
+    defaultConfig {
+        applicationId 'com.xiaozhi.x08c'
+        minSdk 24
+        targetSdk 28
+        versionCode 2
+        versionName '0.2.0'
+
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17'
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += ["$rootDir/third_party/sherpa-onnx/src/main/java"]
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/native/CMakeLists.txt'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // X08C is a local Android 9 sideload target, not a Google Play submission.
+    lint {
+        disable 'ExpiredTargetSdkVersion'
+    }
+}
+
+dependencies {
+    implementation 'com.neovisionaries:nv-websocket-client:2.14'
+}
