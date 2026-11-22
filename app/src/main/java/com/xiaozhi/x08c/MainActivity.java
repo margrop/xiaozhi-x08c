@@ -548,6 +548,26 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != 1001) {
+            return;
+        }
+        if (grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            // The foreground service may have started before the runtime grant
+            // and therefore skipped AudioRecord creation. Re-deliver START so
+            // onStartCommand() retries capture immediately.
+            Intent start = new Intent(this, VoiceAssistantService.class);
+            start.setAction(VoiceAssistantService.ACTION_START);
+            startService(start);
+            Toast.makeText(this, "麦克风已授权，语音服务已启动", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "未获得麦克风权限，无法使用语音唤醒", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
     public void onUserInteraction() {
         super.onUserInteraction();
         if (service != null) {
