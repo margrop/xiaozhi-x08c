@@ -9,6 +9,7 @@ required = [
     "MINIMAX_LLM_MODEL",
     "MINIMAX_TTS_MODEL",
     "MINIMAX_TTS_VOICE",
+    "SERVER_IP",
 ]
 
 optional = {
@@ -39,10 +40,17 @@ if missing:
     raise SystemExit("Missing required settings: " + ", ".join(missing))
 
 content = template_path.read_text(encoding="utf-8")
+
 for key in required:
-    content = content.replace("__" + key + "__", values[key])
+    value = values[key]
+    if key != "SERVER_IP" and value.startswith("<") and value.endswith(">"):
+        raise SystemExit("Placeholder value is not allowed: " + key)
+    content = content.replace("__" + key + "__", json.dumps(value, ensure_ascii=False))
+content = content.replace("<SERVER_IP>", values["SERVER_IP"])
+content = content.replace("<DEVICE_IP>", values["SERVER_IP"])
 for key, default in optional.items():
-    content = content.replace("__" + key + "__", values.get(key, default))
+    value = values.get(key, default)
+    content = content.replace("__" + key + "__", json.dumps(value, ensure_ascii=False))
 
 ha_devices = values.get("HOME_ASSISTANT_DEVICES", "").strip()
 device_entries = [entry.strip() for entry in ha_devices.split(";") if entry.strip()]
@@ -57,8 +65,12 @@ content = content.replace("__HOME_ASSISTANT_DEVICES_YAML__", devices_yaml)
 if "__MINIMAX_" in content or "__QWEATHER_" in content or "__HOME_ASSISTANT_" in content:
     raise SystemExit("Unresolved server placeholder remains")
 
+if output_path.is_symlink():
+    raise SystemExit("Refusing to write through a symlink: " + str(output_path))
+output_path.parent.mkdir(parents=True, exist_ok=True)
 flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
 fd = os.open(output_path, flags, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as output:
     output.write(content)
+os.chmod(output_path, 0o600)
 print(f"Configuration written to {output_path}; secrets were not printed")

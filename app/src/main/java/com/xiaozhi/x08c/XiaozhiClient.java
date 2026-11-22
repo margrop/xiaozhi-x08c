@@ -22,6 +22,7 @@ public final class XiaozhiClient {
     private static final int INPUT_SAMPLE_RATE = 16000;
     private static final int DEFAULT_OUTPUT_SAMPLE_RATE = 24000;
     private static final long RECONNECT_DELAY_SECONDS = 3L;
+    private static final int MAX_OUTBOUND_QUEUE = 128;
 
     /** Manual listen mode: the client sends listen stop when the button is released. */
     public static final String LISTEN_MODE_MANUAL = "manual";
@@ -63,6 +64,7 @@ public final class XiaozhiClient {
     private boolean listening;
     private boolean speaking;
     private String sessionId = "";
+    private int outboundQueueDepth;
 
     public XiaozhiClient(SettingsStore settings, Listener listener) {
         this.settings = settings;
@@ -559,6 +561,15 @@ public final class XiaozhiClient {
             return;
         }
         try {
+            if (binary != null) {
+                synchronized (lock) {
+                    if (outboundQueueDepth >= MAX_OUTBOUND_QUEUE) {
+                        notifyError("WebSocket 音频发送队列已满，丢弃音频帧");
+                        return;
+                    }
+                    outboundQueueDepth++;
+                }
+            }
             executor.execute(new Runnable() {
                 @Override
                 public void run() {
@@ -579,6 +590,14 @@ public final class XiaozhiClient {
                         }
                     } catch (Exception error) {
                         handleSocketError(socket, error, "Could not send WebSocket data");
+                    } finally {
+                        if (binary != null) {
+                            synchronized (lock) {
+                                if (outboundQueueDepth > 0) {
+                                    outboundQueueDepth--;
+                                }
+                            }
+                        }
                     }
                 }
             });

@@ -16,17 +16,18 @@ public final class DeviceIdentity {
 
     public static String getDeviceId(Context context) {
         SettingsStore store = new SettingsStore(context);
-        String deviceId = readWlan0Mac();
+        String deviceId = store.getDeviceId();
+        if (isUsablePersistedId(deviceId)) {
+            return deviceId;
+        }
 
+        deviceId = stableHashId(readAndroidId(context));
         if (isEmpty(deviceId)) {
-            deviceId = stableHashId(readAndroidId(context));
+            deviceId = readWlan0Mac();
         }
 
         // ANDROID_ID can be unavailable on some devices. Reuse a saved value, or
         // create and persist one final installation-stable fallback.
-        if (isEmpty(deviceId)) {
-            deviceId = store.getDeviceId();
-        }
         if (isEmpty(deviceId)) {
             deviceId = stableHashId(UUID.randomUUID().toString());
         }
@@ -35,6 +36,10 @@ public final class DeviceIdentity {
             store.save(store.getServerUrl(), store.getToken(), deviceId);
         }
         return deviceId != null ? deviceId : "";
+    }
+
+    private static boolean isUsablePersistedId(String value) {
+        return !isEmpty(value);
     }
 
     private static String readWlan0Mac() {

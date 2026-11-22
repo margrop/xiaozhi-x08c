@@ -3,6 +3,12 @@
 服务端直接运行上游 [xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server)
 官方镜像，本仓库仅提供 `server/` 下的部署配置。下文以部署主机局域网地址 `<SERVER_IP>` 表示。
 
+## 传输安全
+
+示例使用 `ws://` 便于可信局域网调试；Token 会通过 WebSocket `Authorization` 头发送。
+跨网段、共享网络或公网部署必须在反向代理后启用 `wss://`/TLS，并在客户端使用对应的 `wss://` 地址。
+当前 Android 应用为了兼容 X08C 局域网环境开启了明文流量，不能把 `ws://` 视为安全传输。
+
 ## 端口与入口
 
 | 端口 | 用途 |
@@ -53,13 +59,13 @@
 
 1. 复制模板：`cp server/minimax.env.example xiaozhi-minimax.env`（放在部署主机上，
    例如 `/root/xiaozhi-minimax.env`）。
-2. 填入真实值：`MINIMAX_API_KEY`、`MINIMAX_GROUP_ID`、`MINIMAX_LLM_MODEL`、
+2. 填入真实值：`SERVER_IP`、`MINIMAX_API_KEY`、`MINIMAX_GROUP_ID`、`MINIMAX_LLM_MODEL`、
    `MINIMAX_TTS_MODEL`、`MINIMAX_TTS_VOICE`。
 3. 渲染配置：
 
    ```bash
    python3 server/render-config.py xiaozhi-minimax.env \
-       server/config.template.yaml /path/to/data/config.yaml
+       server/config.template.yaml /path/to/data/.config.yaml
    ```
 
    `render-config.py` 会校验必需项、替换 `__MINIMAX_*__` 占位符，
@@ -82,7 +88,7 @@
 
 ```bash
 cd server
-# 先把渲染好的 config.yaml 放到 ./data 下，并把模型放到 ./models 下
+# 先把渲染好的 .config.yaml 放到 ./data 下，并把模型放到 ./models 下
 docker compose up -d
 ```
 

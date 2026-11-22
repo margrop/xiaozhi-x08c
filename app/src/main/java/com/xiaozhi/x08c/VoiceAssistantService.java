@@ -1,11 +1,13 @@
 package com.xiaozhi.x08c;
 
 import android.Manifest;
-import android.app.Notification;import android.app.NotificationChannel;
+import android.app.Notification;
+import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Context;import android.content.Intent;
+import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Binder;
 import android.os.Build;
@@ -37,8 +39,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *   <li>{@code SPEAKING} – server TTS in flight; uplink stopped, audio played.</li>
  *   <li>{@code NATIVE_ACTIVE} – “小爱同学” heard; playback/uplink yielded to the
  *       stock assistant for a short cooldown; capture keeps running.</li>
- *   <li>{@code MANUAL_LISTENING} – hold-to-talk; listen start mode=manual,
- *       releasing the button stops the uplink.</li>
+ *   <li>{@code MANUAL_LISTENING} – compatibility API; the visible UI uses click-to-talk auto mode.</li>
  * </ul>
  *
  * The stock “小爱同学” service is never stopped or disabled.
@@ -316,6 +317,13 @@ public class VoiceAssistantService extends Service {
         }
     };
 
+    private final Runnable delayedAutoListenRunnable = new Runnable() {
+        @Override
+        public void run() {
+            beginAutoListen(false);
+        }
+    };
+
     private final Runnable returnToIdleScreenRunnable = new Runnable() {
         @Override
         public void run() {
@@ -367,60 +375,57 @@ public class VoiceAssistantService extends Service {
         }
     };
 
-    private final XiaozhiClient.Listener clientListener = new XiaozhiClient.Listener() {
-        @Override
-        public void onState(String connectionState, boolean ready) {
-            notifyConnectionState(connectionState, ready);
-            if (!ready) {
-                boolean keepWakeSession;
-                synchronized (lock) {
-                    // A connecting notification is also reported as ready=false.
-                    // Do not collapse the wake session back to IDLE while the
-                    // connection is being established; doing so re-armed KWS
-                    // and allowed the same wake to play two acknowledgments.
-                    keepWakeSession = pendingAutoListen
-                            || state == State.XIAOZHI_LISTENING
-                            || wakeAckPlaying;
-                    if (!keepWakeSession) {
-                        pendingAutoListen = false;
-                    }
-                }
-                if (keepWakeSession) {
-                    return;
-                }
-                audioEngine.stopPlayback();
-                synchronized (lock) {
-                    if (state != State.NATIVE_ACTIVE) {
-                        setStateLocked(State.IDLE);
-                    }
-                }
-                // The session is over and the UI may still be up; make sure the
-                // clock screen returns on its own.
-                scheduleIdleReturn();
-            }
-        }
-
-        @Override
-        public void onReady(int outputSampleRate) {
-            audioEngine.setOutputSampleRate(outputSampleRate);
-            boolean beginAuto;
+    private void handleClientState(String connectionState, boolean ready) {
+        notifyConnectionState(connectionState, ready);
+        if (!ready) {
+            boolean keepWakeSession;
             synchronized (lock) {
-                beginAuto = pendingAutoListen;
-                pendingAutoListen = false;
+                keepWakeSession = pendingAutoListen
+                        || state == State.XIAOZHI_LISTENING
+                        || wakeAckPlaying;
+                if (!keepWakeSession) {
+                    pendingAutoListen = false;
+                }
             }
-            if (beginAuto) {
-                mainHandler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        beginAutoListen(false);
-                    }
-                }, WAKE_ACK_GUARD_MS);
+            if (keepWakeSession) {
+                return;
             }
+            audioEngine.stopPlayback();
+            synchronized (lock) {
+                if (state != State.NATIVE_ACTIVE) {
+                    setStateLocked(State.IDLE);
+                }
+            }
+            scheduleIdleReturn();
         }
+    }
 
-        @Override
-        public void onUserText(String text) {
-            if (state == State.XIAOZHI_LISTENING || state == State.MANUAL_LISTENING) {
+    private void handleClientReady(int outputSampleRate) {
+        if (!OpusCodec.isSupportedSampleRate(outputSampleRate)) {
+            notifyError("服务端返回不支持的音频采样率: " + outputSampleRate);
+            if (client != null) {
+                client.disconnect();
+            }
+            return;
+        }
+        audioEngine.setOutputSampleRate(outputSampleRate);
+        boolean beginAuto;
+        synchronized (lock) {
+            beginAuto = pendingAutoListen;
+            pendingAutoListen = false;
+        }
+        if (beginAuto) {
+            mainHandler.removeCallbacks(delayedAutoListenRunnable);
+            mainHandler.postDelayed(delayedAutoListenRunnable, WAKE_ACK_GUARD_MS);
+        }
+    }
+
+    private void handleClientUserText(String text) {
+        State current;
+        synchronized (lock) {
+            current = state;
+        }
+        if (current == State.XIAOZHI_LISTENING || current == State.MANUAL_LISTENING) {
             String normalized = text == null ? "" : text.replaceAll("\\s+", "").toLowerCase();
             if (isStandaloneStopCommand(normalized)) {
                 handleStopCommand();
@@ -428,48 +433,74 @@ public class VoiceAssistantService extends Service {
             }
         }
         notifyUserText(text);
+    }
+
+    private void handleClientSpeaking(boolean speaking) {
+        if (speaking) {
+            autoListenReady = false;
+            followUpListening = false;
+            mainHandler.removeCallbacks(followUpTimeoutRunnable);
+            stopWakeAck();
+            synchronized (lock) {
+                if (state == State.NATIVE_ACTIVE) {
+                    return;
+                }
+                setStateLocked(State.SPEAKING);
+            }
+        } else {
+            // tts.stop can arrive before the final queued Opus packets have
+            // drained. Do not flush playback here; the next listen starts only
+            // after the short guard, while AudioEngine finishes queued audio.
+            synchronized (lock) {
+                if (state == State.SPEAKING) {
+                    autoListenReady = false;
+                    setStateLocked(State.IDLE);
+                    startFollowUpListen();
+                }
+            }
+        }
+    }
+
+    private final XiaozhiClient.Listener clientListener = new XiaozhiClient.Listener() {
+        private void postToMain(Runnable action) {
+            mainHandler.post(action);
+        }
+
+        @Override
+        public void onState(String connectionState, boolean ready) {
+            postToMain(() -> handleClientState(connectionState, ready));
+        }
+
+        @Override
+        public void onReady(int outputSampleRate) {
+            postToMain(() -> handleClientReady(outputSampleRate));
+        }
+
+        @Override
+        public void onUserText(String text) {
+            postToMain(() -> handleClientUserText(text));
         }
 
         @Override
         public void onAssistantText(String text) {
-            notifyAssistantText(text);
+            postToMain(() -> notifyAssistantText(text));
         }
 
         @Override
         public void onSpeaking(boolean speaking) {
-            if (speaking) {
-                // Server TTS means the user's turn has ended. Never let a
-                // previous ack/turn continue to feed another auto session.
-                autoListenReady = false;
-                followUpListening = false;
-                mainHandler.removeCallbacks(followUpTimeoutRunnable);
-                stopWakeAck();
-                synchronized (lock) {
-                    if (state == State.NATIVE_ACTIVE) {
-                        return;
-                    }
-                    setStateLocked(State.SPEAKING);
-                }
-            } else {
-                audioEngine.stopPlayback();
-                synchronized (lock) {
-                    if (state == State.SPEAKING) {
-                        autoListenReady = false;
-                        setStateLocked(State.IDLE);
-                        startFollowUpListen();
-                    }
-                }
-            }
+            postToMain(() -> handleClientSpeaking(speaking));
         }
 
         @Override
         public void onAudio(byte[] data) {
+            // AudioTrack work is already isolated by AudioEngine; enqueue from
+            // the socket callback without mutating service state here.
             audioEngine.playOpus(data);
         }
 
         @Override
         public void onError(String message) {
-            notifyError(message);
+            postToMain(() -> notifyError(message));
         }
     };
 
@@ -527,8 +558,14 @@ public class VoiceAssistantService extends Service {
     @Override
     public void onDestroy() {
         destroyed = true;
-        mainHandler.removeCallbacksAndMessages(null);
-        pendingAutoListen = false;
+        mainHandler.removeCallbacks(delayedAutoListenRunnable);
+        mainHandler.removeCallbacks(followUpTimeoutRunnable);
+        mainHandler.removeCallbacks(autoListenTimeoutRunnable);
+        synchronized (lock) {
+            pendingAutoListen = false;
+            autoListenReady = false;
+            followUpListening = false;
+        }
         stopWakeAck();
         setState(State.IDLE);
         if (client != null) {
@@ -618,10 +655,19 @@ public class VoiceAssistantService extends Service {
         }
     }
 
-    public void disconnectClient() {
+    private void cancelAutoSession() {
+        mainHandler.removeCallbacks(delayedAutoListenRunnable);
+        mainHandler.removeCallbacks(followUpTimeoutRunnable);
+        mainHandler.removeCallbacks(autoListenTimeoutRunnable);
         synchronized (lock) {
             pendingAutoListen = false;
+            autoListenReady = false;
+            followUpListening = false;
         }
+    }
+
+    public void disconnectClient() {
+        cancelAutoSession();
         if (client != null) {
             client.disconnect();
         }
@@ -635,9 +681,7 @@ public class VoiceAssistantService extends Service {
     }
 
     public void reconnect() {
-        synchronized (lock) {
-            pendingAutoListen = false;
-        }
+        cancelAutoSession();
         if (client == null) {
             return;
         }
@@ -648,18 +692,12 @@ public class VoiceAssistantService extends Service {
         }
     }
 
-    /**
-     * Hold-to-talk entry point. Starts a manual listen when the client is
-     * ready, otherwise kicks a connection attempt and reports failure so the
-     * UI can prompt the user.
-     *
-     * @return true when the manual listen actually started.
-     */
     /** UI equivalent of saying “小智小智”: show the assistant UI and enter auto VAD. */
     public void activateXiaozhi() {
         mainHandler.post(wakeXiaozhiRunnable);
     }
 
+    /** Compatibility API for callers that still need a manual listen session. */
     public boolean beginManualListening() {
         synchronized (lock) {
             if (state == State.NATIVE_ACTIVE) {
@@ -700,15 +738,13 @@ public class VoiceAssistantService extends Service {
     /** Local interrupt: stop playback and any in-flight listen/turn. */
     public void interruptSession() {
         cancelIdleReturn();
+        cancelAutoSession();
         audioEngine.stopPlayback();
         if (client != null) {
             client.stopListening();
             if (client.isReady()) {
                 client.abort();
             }
-        }
-        synchronized (lock) {
-            pendingAutoListen = false;
         }
         setState(State.IDLE);
         scheduleIdleReturn();
@@ -824,6 +860,11 @@ public class VoiceAssistantService extends Service {
      *     buffered audio is stale and would truncate the fresh session.
      */
     private void beginAutoListen(boolean flushPreRoll) {
+        synchronized (lock) {
+            if (state != State.XIAOZHI_LISTENING || destroyed) {
+                return;
+            }
+        }
         wakeAckPlaying = false;
         autoListenReady = false;
         client.startListening(XiaozhiClient.LISTEN_MODE_AUTO);

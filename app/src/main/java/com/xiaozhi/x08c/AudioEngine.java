@@ -7,8 +7,8 @@ import android.media.AudioTrack;
 import android.media.MediaRecorder;
 
 import java.util.Arrays;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 /** Audio capture, Opus playback, and a bounded local microphone loopback test. */
@@ -35,6 +35,7 @@ public final class AudioEngine implements AutoCloseable {
     private static final int BYTES_PER_SAMPLE = 2;
     private static final int LOOPBACK_FRAMES = 33; // About 1.98 seconds.
     private static final int ZERO_FRAME_ERROR_THRESHOLD = 50; // 3 seconds.
+    private static final int PLAYBACK_QUEUE_CAPACITY = 64;
     private static final long THREAD_JOIN_MS = 1500;
 
     private final Object stateLock = new Object();
@@ -154,6 +155,9 @@ public final class AudioEngine implements AutoCloseable {
                 joinThread(thread, 500);
             }
         }
+        if (thread != null && thread.isAlive()) {
+            safeError("录音线程未能在关闭前退出");
+        }
         finishRecording(session);
     }
 
@@ -209,7 +213,11 @@ public final class AudioEngine implements AutoCloseable {
                     session.thread.start();
                 }
                 // Own the queued bytes even if the caller reuses its network buffer.
-                session.queue.offer(Arrays.copyOf(data, data.length));
+                if (!session.queue.offer(Arrays.copyOf(data, data.length))) {
+                    safeError("播放队列已满，丢弃过量音频帧");
+                    session.running = false;
+                    session.queue.clear();
+                }
             }
         } catch (RuntimeException | UnsatisfiedLinkError error) {
             safeError("启动 Opus 播放失败: " + usefulMessage(error));
@@ -679,7 +687,7 @@ public final class AudioEngine implements AutoCloseable {
     }
 
     private final class PlaybackSession {
-        final BlockingQueue<byte[]> queue = new LinkedBlockingQueue<>();
+        final BlockingQueue<byte[]> queue = new ArrayBlockingQueue<>(PLAYBACK_QUEUE_CAPACITY);
         final Thread thread;
         AudioTrack audioTrack;
         volatile boolean running = true;

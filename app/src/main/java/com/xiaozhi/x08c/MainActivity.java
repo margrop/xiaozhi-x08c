@@ -150,7 +150,7 @@ public class MainActivity extends Activity {
         DeviceIdentity.getDeviceId(this);
         setContentView(buildUi());
         updateServerLabel();
-        appendTranscript("系统", "说“小智小智”唤醒小智，或按住说话；不会修改原厂小爱。");
+        appendTranscript("系统", "说“小智小智”或“小屁小屁”唤醒小智，或点击说话；不会修改原厂小爱。");
 
         // Keep the foreground service alive regardless of this activity.
         Intent start = new Intent(this, VoiceAssistantService.class);

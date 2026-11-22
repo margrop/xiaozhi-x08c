@@ -5,9 +5,17 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".gradle", "build", ".cxx", ".idea", "node_modules", "__pycache__"}
 FORBIDDEN_NAME_SUFFIXES = {
-    ".jks", ".keystore", ".p12", ".pem", ".key", ".apk", ".aab", ".img", ".bin"
+    ".jks", ".keystore", ".p12", ".pem", ".key", ".apk", ".aab", ".img", ".bin",
+    ".zip", ".tar", ".gz", ".7z"
 }
-ALLOWED_BINARY_SUFFIXES = {".so", ".onnx"}
+ALLOWED_BINARY_SUFFIXES = {".so", ".onnx", ".wav", ".jar"}
+ALLOWED_EXTENSIONLESS_NAMES = {
+    ".gitignore", "LICENSE", "gradlew", "gradlew.bat", "compile", "configure",
+    "install-sh", "missing", "test-driver"
+}
+ALLOWED_EXTENSIONLESS_PREFIXES = {
+    "third_party/opus/", "gradle/wrapper/"
+}
 FORBIDDEN_TEXT_PATTERNS = {
     "private ipv4 address": re.compile(
         r"(?<![0-9])(?:10(?:\.[0-9]{1,3}){3}|"
@@ -28,8 +36,9 @@ FORBIDDEN_TEXT_PATTERNS = {
 }
 TEXT_SUFFIXES = {
     ".java", ".kt", ".xml", ".gradle", ".kts", ".md", ".py", ".yaml", ".yml",
-    ".json", ".txt", ".properties", ".sh", ".cpp", ".h", ".hpp", ".c", ".cmake"
-}
+    ".json", ".txt", ".properties", ".sh", ".cpp", ".h", ".hpp", ".c", ".cmake",
+    ".bat", ".example", ".m4", ".in", ".S", ".s", ".mk", ".am", ".ac", ".mips",
+    ".unix", ".build", ".svg", ".css", ".pc", ".pl", ".html", ".guess", ".sub"}
 
 errors = []
 for path in sorted(ROOT.rglob("*")):
@@ -43,7 +52,13 @@ for path in sorted(ROOT.rglob("*")):
     if path.suffix.lower() in FORBIDDEN_NAME_SUFFIXES:
         errors.append(f"Forbidden file type: {relative}")
         continue
+    if path.suffix.lower() in ALLOWED_BINARY_SUFFIXES:
+        continue
+    if (path.suffix == "" and (path.name in ALLOWED_EXTENSIONLESS_NAMES
+            or any(relative.startswith(prefix) for prefix in ALLOWED_EXTENSIONLESS_PREFIXES))):
+        continue
     if path.suffix.lower() not in TEXT_SUFFIXES:
+        errors.append(f"Unknown or unallowlisted file type: {relative}")
         continue
     try:
         content = path.read_text(encoding="utf-8")

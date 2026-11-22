@@ -3,8 +3,7 @@ package com.xiaozhi.x08c;
 import java.util.Arrays;
 
 /**
- * Opus encoder/decoder backed by the bundled ARM32 libopus.so, with a system
- * library fallback for compatible device builds.
+ * Opus encoder/decoder backed by the statically bundled ARM32 Opus library.
  *
  * <p>The encoder always accepts 60 ms, 16 kHz, mono PCM frames. The decoder can
  * output at any sample rate supported by Opus.</p>
@@ -118,6 +117,15 @@ public final class OpusCodec implements AutoCloseable {
         if (closed) {
             throw new IllegalStateException("OpusCodec 已关闭");
         }
+    }
+
+    public static boolean isSupportedSampleRate(int sampleRate) {
+        for (int supported : SUPPORTED_SAMPLE_RATES) {
+            if (supported == sampleRate) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void checkSampleRate(int sampleRate) {

@@ -34,7 +34,7 @@ artifacts/
 *.idsig
 
 # Xiaozhi server runtime data and models
-server/data/.config.yaml
+server/data/
 server/models/
 
 # Python cache

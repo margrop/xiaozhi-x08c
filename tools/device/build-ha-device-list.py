@@ -6,7 +6,8 @@ import sys
 import urllib.request
 
 SAFE_DOMAINS = {"light", "switch", "climate", "fan", "media_player"}
-REQUIRED_DOMAIN_PATTERN = re.compile(r"面包|toaster", re.IGNORECASE)
+BREAD_MACHINE_PATTERN = re.compile(r"面包|toaster", re.IGNORECASE)
+BREAD_MACHINE_DOMAINS = {"button", "number", "select", "sensor", "switch"}
 # Camera-adjacent switches (motion tracking, indicator light on a camera, etc.)
 # are excluded even though they live in the switch domain.
 EXCLUDED_PATTERN = re.compile(r"camera|摄像机|camera_control", re.IGNORECASE)
@@ -44,7 +45,9 @@ def main():
     env = load_env(env_path)
     base_url = env.get("HOME_ASSISTANT_BASE_URL", "").strip()
     api_key = env.get("HOME_ASSISTANT_API_KEY", "").strip()
-    location = env.get("HOME_ASSISTANT_DEVICE_LOCATION", "家居").strip() or "家居"
+    location = clean_name(env.get("HOME_ASSISTANT_DEVICE_LOCATION", "家居"))
+    if not location:
+        location = "家居"
 
     if not base_url or not api_key:
         raise SystemExit("HOME_ASSISTANT_BASE_URL and HOME_ASSISTANT_API_KEY must be set")
@@ -59,12 +62,11 @@ def main():
         domain = entity_id.split(".", 1)[0]
         attributes = state.get("attributes") or {}
         friendly_name = clean_name(attributes.get("friendly_name") or entity_id)
-        required = bool(REQUIRED_DOMAIN_PATTERN.search(entity_id) or REQUIRED_DOMAIN_PATTERN.search(friendly_name))
-        if domain not in SAFE_DOMAINS and not required:
+        required = bool(BREAD_MACHINE_PATTERN.search(entity_id) or BREAD_MACHINE_PATTERN.search(friendly_name))
+        allowed_bread_machine = required and domain in BREAD_MACHINE_DOMAINS
+        if domain not in SAFE_DOMAINS and not allowed_bread_machine:
             continue
-        if not required and EXCLUDED_PATTERN.search(entity_id):
-            continue
-        if not required and EXCLUDED_PATTERN.search(friendly_name):
+        if EXCLUDED_PATTERN.search(entity_id) or EXCLUDED_PATTERN.search(friendly_name):
             continue
         if entity_id in seen:
             continue
@@ -94,7 +96,7 @@ def main():
     env_path.write_text("\n".join(output) + "\n", encoding="utf-8")
     os.chmod(env_path, 0o600)
 
-    required_matches = [item for item in selected if REQUIRED_DOMAIN_PATTERN.search(item[1]) or REQUIRED_DOMAIN_PATTERN.search(item[2])]
+    required_matches = [item for item in selected if BREAD_MACHINE_PATTERN.search(item[1]) or BREAD_MACHINE_PATTERN.search(item[2])]
     print(f"ha_entities_total={len(states)}")
     print(f"selected_devices={len(selected)}")
     print(f"required_matches={len(required_matches)}")

@@ -90,6 +90,10 @@ adb shell am start -n com.xiaozhi.x08c/.MainActivity \
   --es device_id "<DEVICE_ID>"
 ```
 
+## 传输安全
+
+可信局域网示例使用 `ws://`；Token 会随 WebSocket 请求发送。跨网段或公网部署必须使用 TLS 反向代理和 `wss://`，不要在不可信网络中使用明文 WebSocket。
+
 ## 服务端默认组件
 
 | 组件 | 实现 | 说明 |
@@ -118,6 +122,11 @@ CI 不具备 X08C 麦克风、原厂小爱、真实服务端或 HA 环境，因�
 - 仓库只使用 `<SERVER_IP>`、`<DEVICE_IP>`、`<DEVICE_MAC>` 等占位符；真实密钥和地址只保存在本地部署配置；
 - 提交前运行 `python3 tools/check-public-tree.py`；
 - 修改设备分区前，先按 [tools/backup-verify/README.md](tools/backup-verify/README.md) 完整备份。
+
+## Wiki 页面草稿
+
+仓库 `wiki/` 目录包含可直接发布到 GitHub Wiki 的 Home、入门、唤醒词、服务端/HA 和排障页面。
+发布 Wiki 时只保留 `<SERVER_IP>`、`<DEVICE_IP>`、`<DEVICE_MAC>` 等占位符，不要放入真实配置。
 
 ## 上游项目
 

@@ -21,7 +21,14 @@ This project combines original code with the following third-party components.
 - License text: [licenses/SHERPA-ONNX.txt](licenses/SHERPA-ONNX.txt)
 - KWS model: `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`, see [app/src/main/assets/kws/README.md](app/src/main/assets/kws/README.md)
 
-## Upstream projects
+## ONNX Runtime
+
+- Source: https://github.com/microsoft/onnxruntime
+- Version observed in the packaged Android binary: 1.28.2
+- License: MIT License
+- License/provenance: [licenses/ONNX-RUNTIME.md](licenses/ONNX-RUNTIME.md)
+- Binary: `app/src/main/jniLibs/armeabi-v7a/libonnxruntime.so`
+
 
 - Xiaozhi ESP32 firmware and protocol: https://github.com/78/xiaozhi-esp32
 - Xiaozhi ESP32 Server: https://github.com/xinnan-tech/xiaozhi-esp32-server
