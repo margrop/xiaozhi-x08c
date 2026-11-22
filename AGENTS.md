@@ -48,6 +48,12 @@ For this Windows workspace, WSL with Java 17 and a temporary ignored `local.prop
 
 Keep README, `docs/`, and `wiki/` aligned with the current implementation. The `wiki/` directory contains sanitized pages ready to publish to GitHub Wiki. Never publish secrets or concrete network/device identifiers.
 
+## Versioning and releases
+
+- Stable release tags use `vMAJOR.MINOR.PATCH` and must exactly match `app/build.gradle` `versionName`.
+- Keep `versionCode` synchronized with the documented numeric formula; run `python tools/check-version.py` before release commits.
+- Follow `docs/release.md` for changelog, validation, tagging, and artifact checks.
+
 ## Commits
 
 Use concise, descriptive commit messages. Include the verification commands and any skipped hardware/integration tests in the final report. Do not rewrite or force-push history unless the user explicitly requests it.

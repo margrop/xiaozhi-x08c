@@ -2,7 +2,7 @@
 
 在小米小爱音箱 X08C（Android 9、ARM32）上运行的小智语音客户端，配合
 [xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) Docker 部署使用。
-当前应用版本为 **0.2.0**，目标 ABI 为 `armeabi-v7a`。
+当前应用版本为 **0.2.0**，目标 ABI 为 `armeabi-v7a`。发布号、Android `versionCode`、Git tag 和 GitHub Release 的对应规则见 [docs/release.md](docs/release.md)。
 
 - 客户端：原生 Android 应用（Java + JNI），提供点击说话、自动 VAD、多唤醒词、TTS 播放与打断。
 - 服务端：复用上游 `xiaozhi-esp32-server` 官方镜像，本仓库提供部署模板、配置渲染和测试脚本。
@@ -72,7 +72,7 @@ xiaozhi-x08c/
 ```
 
 产物为 `app/build/outputs/apk/debug/app-debug.apk`，仅包含 `armeabi-v7a`。
-应用参数为 `minSdk 24`、`targetSdk 28`、`versionCode 2`、`versionName 0.2.0`。
+应用参数为 `minSdk 24`、`targetSdk 28`、`versionCode 20000`、`versionName 0.2.0`。版本号规则和发布流程见 [docs/release.md](docs/release.md)。
 
 ## 安装与配置
 

@@ -39,6 +39,9 @@ jobs:
             "ndk;26.3.11579264" \
             "cmake;3.22.1"
 
+      - name: Validate release version
+        run: python3 tools/check-version.py
+
       - name: Grant Gradle wrapper permission
         run: chmod +x gradlew
 
