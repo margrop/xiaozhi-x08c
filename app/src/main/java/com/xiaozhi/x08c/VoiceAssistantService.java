@@ -542,11 +542,33 @@ public class VoiceAssistantService extends Service {
         }
     }
 
-    /** Filler words the offline ASR hallucinates from pure ambient noise. */
-    private static final java.util.Set<String> NOISE_UTTERANCES =
-            new java.util.HashSet<>(java.util.Arrays.asList(
-                    "嗯", "嗯嗯", "嗯嗯嗯", "呃", "呃呃", "啊", "哦", "喔", "欸",
-                    "没有", "没", "不", "不是", "没啊"));
+    /**
+     * Filler building blocks the offline ASR hallucinates from ambient noise.
+     * An utterance made of nothing but these (in any order or repetition,
+     * e.g. "没有没有", "嗯嗯没有啊") is treated as noise, not as a command.
+     */
+    private static final String[] NOISE_FILLER_WORDS = {
+            "没有", "不是", "是啊", "嗯", "呃", "啊", "哦", "喔", "欸",
+            "没", "不", "了", "的", "吧", "呀", "呢", "哈",
+    };
+
+    private static boolean isNoiseUtterance(String plain) {
+        if (plain.isEmpty()) {
+            return true;
+        }
+        String rest = plain;
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (String word : NOISE_FILLER_WORDS) {
+                if (rest.contains(word)) {
+                    rest = rest.replace(word, "");
+                    changed = true;
+                }
+            }
+        }
+        return rest.isEmpty();
+    }
 
     private void handleClientUserText(String text) {
         State current;
@@ -562,7 +584,7 @@ public class VoiceAssistantService extends Service {
             }
             // Ambient noise is transcribed as filler words; answering them
             // starts an endless reply loop that never returns to idle.
-            if (current == State.XIAOZHI_LISTENING && NOISE_UTTERANCES.contains(plain)) {
+            if (current == State.XIAOZHI_LISTENING && isNoiseUtterance(plain)) {
                 Log.i(TAG, "noise utterance dismissed: " + plain);
                 dismissNoiseTurn();
                 return;
