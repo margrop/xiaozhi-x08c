@@ -84,6 +84,13 @@ public class VoiceAssistantService extends Service {
      * again (matches the stock “小爱同学” behaviour).
      */
     private static final long AUTO_LISTEN_SILENCE_TIMEOUT_MS = 10000L;
+    /**
+     * Hard cap on any listen window: speech energy cancels the silence
+     * timers, but if the server never starts a turn (empty/noise input) the
+     * session would otherwise stay in “listening” forever and the idle
+     * return to the clock screen would never be scheduled.
+     */
+    private static final long TURN_WAIT_TIMEOUT_MS = 20000L;
     /** 5-second follow-up window after TTS, without requiring the wake word. */
     private static final long FOLLOW_UP_LISTEN_TIMEOUT_MS = 5000L;
     /** 16-bit PCM RMS above this counts as speech for the timeout. */
@@ -385,6 +392,13 @@ public class VoiceAssistantService extends Service {
         }
     };
 
+    private final Runnable turnWaitTimeoutRunnable = new Runnable() {
+        @Override
+        public void run() {
+            handleTurnWaitTimeout();
+        }
+    };
+
     private final Runnable followUpTimeoutRunnable = new Runnable() {
         @Override
         public void run() {
@@ -536,6 +550,7 @@ public class VoiceAssistantService extends Service {
             autoListenReady = false;
             followUpListening = false;
             mainHandler.removeCallbacks(followUpTimeoutRunnable);
+            disarmTurnWait();
             stopWakeAck();
             synchronized (lock) {
                 if (state == State.NATIVE_ACTIVE) {
@@ -780,6 +795,7 @@ public class VoiceAssistantService extends Service {
         mainHandler.removeCallbacks(delayedAutoListenRunnable);
         mainHandler.removeCallbacks(followUpTimeoutRunnable);
         mainHandler.removeCallbacks(autoListenTimeoutRunnable);
+        mainHandler.removeCallbacks(turnWaitTimeoutRunnable);
         mainHandler.removeCallbacks(wakeGateTickRunnable);
         mainHandler.removeCallbacks(wakeGateCompleteRunnable);
         wakeSilenceGating = false;
@@ -1175,6 +1191,7 @@ public class VoiceAssistantService extends Service {
         }
         mainHandler.removeCallbacks(autoListenTimeoutRunnable);
         mainHandler.postDelayed(autoListenTimeoutRunnable, AUTO_LISTEN_SILENCE_TIMEOUT_MS);
+        armTurnWait();
         setState(State.XIAOZHI_LISTENING);
     }
 
@@ -1184,6 +1201,33 @@ public class VoiceAssistantService extends Service {
      * acknowledgment echo nor the tail of an interrupted reply reaches the
      * server ASR.
      */
+    private void armTurnWait() {
+        mainHandler.removeCallbacks(turnWaitTimeoutRunnable);
+        mainHandler.postDelayed(turnWaitTimeoutRunnable, TURN_WAIT_TIMEOUT_MS);
+    }
+
+    private void disarmTurnWait() {
+        mainHandler.removeCallbacks(turnWaitTimeoutRunnable);
+    }
+
+    /** Main thread: a listen produced no server turn within the hard cap. */
+    private void handleTurnWaitTimeout() {
+        synchronized (lock) {
+            if (state != State.XIAOZHI_LISTENING || destroyed) {
+                return;
+            }
+        }
+        Log.i(TAG, "turn wait timeout; ending the stuck listen session");
+        followUpListening = false;
+        autoListenReady = false;
+        abandonXiaozhiFocus();
+        if (client != null) {
+            client.stopListening();
+        }
+        setState(State.IDLE);
+        scheduleIdleReturn();
+    }
+
     private void startWakeSilenceGate() {
         synchronized (preRollLock) {
             preRoll.clear();
@@ -1234,6 +1278,7 @@ public class VoiceAssistantService extends Service {
         }
         mainHandler.removeCallbacks(followUpTimeoutRunnable);
         mainHandler.postDelayed(followUpTimeoutRunnable, FOLLOW_UP_LISTEN_TIMEOUT_MS);
+        armTurnWait();
         Log.i(TAG, "follow-up listen window started (5s)");
     }
 
