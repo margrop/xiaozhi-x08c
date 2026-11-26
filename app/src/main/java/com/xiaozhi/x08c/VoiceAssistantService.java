@@ -19,6 +19,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import android.media.AudioManager;
+import android.media.AudioPlaybackConfiguration;
 import android.media.MediaPlayer;
 
 import java.util.ArrayDeque;
@@ -536,7 +537,12 @@ public class VoiceAssistantService extends Service {
                 }
                 setStateLocked(State.SPEAKING);
             }
+            // If the stock assistant (or media) already owns the speaker the
+            // moment our reply starts, yield instead of talking over it.
+            foreignSpeakerDetected();
+            startSpeakerPoll();
         } else {
+            stopSpeakerPoll();
             // tts.stop can arrive before the final queued Opus packets have
             // drained. Do not flush playback here; the next listen starts only
             // after the short guard, while AudioEngine finishes queued audio.
@@ -822,6 +828,77 @@ public class VoiceAssistantService extends Service {
         focusHeld = false;
     }
 
+    // ------------------------------------------------------- playback monitor
+
+    /**
+     * The stock XiaoAi service can be woken by our own TTS (a reply that
+     * mentions it, or loud speech) and may answer without requesting audio
+     * focus, which the focus listener alone cannot catch. Poll the music
+     * stream while we are answering: if audio is active but our own output
+     * has gone silent, someone else owns the speaker and we must yield.
+     */
+    private static final long SPEAKER_POLL_MS = 400L;
+    private final Runnable speakerPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!foreignSpeakerDetected()) {
+                mainHandler.postDelayed(this, SPEAKER_POLL_MS);
+            }
+        }
+    };
+
+    /**
+     * @return true when another component is playing audio while our output
+     *     is silent; the caller yields the speaker in that case.
+     */
+    private boolean foreignSpeakerDetected() {
+        boolean musicActive = audioManager != null && audioManager.isMusicActive();
+        boolean oursActive = audioEngine != null && audioEngine.isOutputActive();
+        if (musicActive && !oursActive) {
+            Log.i(TAG, "foreign playback detected while our output is silent");
+            handleForeignPlaybackStarted();
+            return true;
+        }
+        return false;
+    }
+
+    private void startSpeakerPoll() {
+        mainHandler.removeCallbacks(speakerPollRunnable);
+        mainHandler.postDelayed(speakerPollRunnable, SPEAKER_POLL_MS);
+    }
+
+    private void stopSpeakerPoll() {
+        mainHandler.removeCallbacks(speakerPollRunnable);
+    }
+
+    /** Main thread: someone else started playing while we were answering. */
+    private void handleForeignPlaybackStarted() {
+        if (destroyed) {
+            return;
+        }
+        State current;
+        synchronized (lock) {
+            current = state;
+        }
+        if (current != State.SPEAKING) {
+            return;
+        }
+        Log.i(TAG, "foreign playback started during SPEAKING; yielding the speaker");
+        stopSpeakerPoll();
+        cancelAutoSession();
+        stopWakeAck();
+        audioEngine.stopPlayback();
+        if (client != null) {
+            client.stopListening();
+            if (client.isReady()) {
+                client.abort();
+            }
+        }
+        abandonXiaozhiFocus();
+        setState(State.IDLE);
+        scheduleIdleReturn();
+    }
+
     /** Another component (stock XiaoAi, music) took the speaker: stop our turn. */
     private void handleExternalFocusLoss() {
         if (destroyed) {
@@ -836,6 +913,7 @@ public class VoiceAssistantService extends Service {
             return;
         }
         Log.i(TAG, "audio focus lost; stopping the active Xiaozhi turn");
+        stopSpeakerPoll();
         cancelAutoSession();
         stopWakeAck();
         audioEngine.stopPlayback();

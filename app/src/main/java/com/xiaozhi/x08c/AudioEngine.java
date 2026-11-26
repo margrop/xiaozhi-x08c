@@ -5,6 +5,7 @@ import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.os.SystemClock;
 
 import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -44,6 +45,7 @@ public final class AudioEngine implements AutoCloseable {
 
     private volatile boolean closed;
     private volatile boolean recording;
+    private volatile long lastPlaybackWriteMs;
     private int outputSampleRate = OpusCodec.DEFAULT_OUTPUT_SAMPLE_RATE;
     private OpusCodec codec;
     private RecordingSession recordingSession;
@@ -165,6 +167,26 @@ public final class AudioEngine implements AutoCloseable {
         return recording;
     }
 
+    /**
+     * True while this engine is actually pushing audio to the speaker. A
+     * drained or stopped playback session does not count, so the service can
+     * tell "someone else is playing" apart from "our queue simply went quiet".
+     */
+    public boolean isOutputActive() {
+        synchronized (stateLock) {
+            PlaybackSession session = playbackSession;
+            if (closed || session == null || !session.running) {
+                return false;
+            }
+            AudioTrack track = session.audioTrack;
+            if (track == null
+                    || track.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                return false;
+            }
+        }
+        return SystemClock.elapsedRealtime() - lastPlaybackWriteMs < 1000L;
+    }
+
     public void setOutputSampleRate(int sampleRate) {
         if (!isSupportedOutputSampleRate(sampleRate)) {
             safeError("不支持的 Opus 输出采样率: " + sampleRate);
@@ -217,6 +239,8 @@ public final class AudioEngine implements AutoCloseable {
                     safeError("播放队列已满，丢弃过量音频帧");
                     session.running = false;
                     session.queue.clear();
+                } else {
+                    lastPlaybackWriteMs = SystemClock.elapsedRealtime();
                 }
             }
         } catch (RuntimeException | UnsatisfiedLinkError error) {
@@ -234,6 +258,7 @@ public final class AudioEngine implements AutoCloseable {
             }
             session.running = false;
             session.queue.clear();
+            lastPlaybackWriteMs = 0L;
         }
 
         AudioTrack track;
