@@ -235,8 +235,14 @@ public class VoiceAssistantService extends Service {
             // frames; ignore re-detections right after an accepted wake.
             long now = SystemClock.elapsedRealtime();
             if (now - lastAcceptedWakeElapsedMs < WAKE_REDETECT_DEBOUNCE_MS) {
+                Log.i(TAG, "wake debounced: " + keyword);
                 return;
             }
+            State currentState;
+            synchronized (lock) {
+                currentState = state;
+            }
+            Log.i(TAG, "keyword accepted: " + keyword + " state=" + currentState);
             // The pre-roll ring must only contain speech captured AFTER the
             // wake keyword; replaying the keyword tail made the server answer
             // the wake word itself ("在啊") on every wake.
@@ -541,8 +547,10 @@ public class VoiceAssistantService extends Service {
             // moment our reply starts, yield instead of talking over it.
             foreignSpeakerDetected();
             startSpeakerPoll();
+            audioEngine.setPlaybackDucked(true);
         } else {
             stopSpeakerPoll();
+            audioEngine.setPlaybackDucked(false);
             // tts.stop can arrive before the final queued Opus packets have
             // drained. Do not flush playback here; the next listen starts only
             // after the short guard, while AudioEngine finishes queued audio.
@@ -885,6 +893,7 @@ public class VoiceAssistantService extends Service {
         }
         Log.i(TAG, "foreign playback started during SPEAKING; yielding the speaker");
         stopSpeakerPoll();
+        audioEngine.setPlaybackDucked(false);
         cancelAutoSession();
         stopWakeAck();
         audioEngine.stopPlayback();
@@ -914,6 +923,7 @@ public class VoiceAssistantService extends Service {
         }
         Log.i(TAG, "audio focus lost; stopping the active Xiaozhi turn");
         stopSpeakerPoll();
+        audioEngine.setPlaybackDucked(false);
         cancelAutoSession();
         stopWakeAck();
         audioEngine.stopPlayback();
@@ -1247,6 +1257,7 @@ public class VoiceAssistantService extends Service {
         autoListenReady = false;
         mainHandler.removeCallbacks(followUpTimeoutRunnable);
         abandonXiaozhiFocus();
+        audioEngine.setPlaybackDucked(false);
         if (client != null) {
             client.stopListening();
             if (client.isReady()) {
@@ -1353,6 +1364,7 @@ public class VoiceAssistantService extends Service {
         mainHandler.removeCallbacks(wakeGateCompleteRunnable);
         // Hand the speaker back so the stock assistant can answer immediately.
         abandonXiaozhiFocus();
+        audioEngine.setPlaybackDucked(false);
         // Yield to the stock assistant: stop our playback and uplink, abort the
         // server turn, but keep the shared capture stream running. This runs
         // from any Xiaozhi state (IDLE / SPEAKING / XIAOZHI_LISTENING) so a

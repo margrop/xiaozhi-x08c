@@ -46,6 +46,7 @@ public final class AudioEngine implements AutoCloseable {
     private volatile boolean closed;
     private volatile boolean recording;
     private volatile long lastPlaybackWriteMs;
+    private float playbackVolume = 1.0f;
     private int outputSampleRate = OpusCodec.DEFAULT_OUTPUT_SAMPLE_RATE;
     private OpusCodec codec;
     private RecordingSession recordingSession;
@@ -172,6 +173,28 @@ public final class AudioEngine implements AutoCloseable {
      * drained or stopped playback session does not count, so the service can
      * tell "someone else is playing" apart from "our queue simply went quiet".
      */
+    /**
+     * Duck our own reply while it is playing: the wake word must win over the
+     * speaker output on the first attempt, and AEC degrades badly in
+     * double-talk (playback + user voice). A quieter reply makes both our
+     * KWS and the stock assistant's mic hear the interruption immediately.
+     */
+    public void setPlaybackDucked(boolean ducked) {
+        float target = ducked ? 0.6f : 1.0f;
+        synchronized (stateLock) {
+            playbackVolume = target;
+            PlaybackSession session = playbackSession;
+            AudioTrack track = session != null ? session.audioTrack : null;
+            if (track != null) {
+                try {
+                    track.setVolume(target);
+                } catch (RuntimeException ignored) {
+                    // Volume is best effort; playback continues regardless.
+                }
+            }
+        }
+    }
+
     public boolean isOutputActive() {
         synchronized (stateLock) {
             PlaybackSession session = playbackSession;
@@ -474,6 +497,11 @@ public final class AudioEngine implements AutoCloseable {
                 throw new IllegalStateException("AudioTrack 初始化失败");
             }
             track.play();
+            try {
+                track.setVolume(playbackVolume);
+            } catch (RuntimeException ignored) {
+                // Volume is best effort; playback continues regardless.
+            }
             session.audioTrack = track;
             return track;
         } catch (RuntimeException error) {
