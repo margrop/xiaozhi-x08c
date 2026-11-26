@@ -95,6 +95,8 @@ public class VoiceAssistantService extends Service {
     private static final long FOLLOW_UP_LISTEN_TIMEOUT_MS = 5000L;
     /** 16-bit PCM RMS above this counts as speech for the timeout. */
     private static final int SPEECH_ENERGY_THRESHOLD = 500;
+    /** Consecutive energetic frames required before speech counts as heard. */
+    private static final int SPEECH_CONFIRM_FRAMES = 4; // ~240 ms
 
     public enum State {
         IDLE,
@@ -289,8 +291,18 @@ public class VoiceAssistantService extends Service {
             return Math.sqrt(sum / (double) samples.length);
         }
 
+        private int speechStreakFrames;
+
         private void trackAutoListenSpeech(double rms) {
             if (rms < SPEECH_ENERGY_THRESHOLD) {
+                speechStreakFrames = 0;
+                return;
+            }
+            // Real speech sustains above the threshold for several frames;
+            // a single loud noise spike must not arm the session or cancel
+            // the silence timers.
+            speechStreakFrames++;
+            if (speechStreakFrames < SPEECH_CONFIRM_FRAMES) {
                 return;
             }
             synchronized (lock) {
@@ -530,6 +542,12 @@ public class VoiceAssistantService extends Service {
         }
     }
 
+    /** Filler words the offline ASR hallucinates from pure ambient noise. */
+    private static final java.util.Set<String> NOISE_UTTERANCES =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "嗯", "嗯嗯", "嗯嗯嗯", "呃", "呃呃", "啊", "哦", "喔", "欸",
+                    "没有", "没", "不", "不是", "没啊"));
+
     private void handleClientUserText(String text) {
         State current;
         synchronized (lock) {
@@ -537,12 +555,36 @@ public class VoiceAssistantService extends Service {
         }
         if (current == State.XIAOZHI_LISTENING || current == State.MANUAL_LISTENING) {
             String normalized = text == null ? "" : text.replaceAll("\\s+", "").toLowerCase();
+            String plain = normalized.replaceAll("[\\p{P}\\p{S}]", "");
             if (isStandaloneStopCommand(normalized)) {
                 handleStopCommand();
                 return;
             }
+            // Ambient noise is transcribed as filler words; answering them
+            // starts an endless reply loop that never returns to idle.
+            if (current == State.XIAOZHI_LISTENING && NOISE_UTTERANCES.contains(plain)) {
+                Log.i(TAG, "noise utterance dismissed: " + plain);
+                dismissNoiseTurn();
+                return;
+            }
         }
         notifyUserText(text);
+    }
+
+    /** End a junk turn quietly: no display, no reply, return to wake arming. */
+    private void dismissNoiseTurn() {
+        followUpListening = false;
+        autoListenReady = false;
+        disarmTurnWait();
+        abandonXiaozhiFocus();
+        if (client != null) {
+            client.stopListening();
+            if (client.isReady()) {
+                client.abort();
+            }
+        }
+        setState(State.IDLE);
+        scheduleIdleReturn();
     }
 
     private void handleClientSpeaking(boolean speaking) {
