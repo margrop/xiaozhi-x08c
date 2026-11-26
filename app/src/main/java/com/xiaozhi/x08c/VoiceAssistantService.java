@@ -70,6 +70,12 @@ public class VoiceAssistantService extends Service {
     private static final long WAKE_REDETECT_DEBOUNCE_MS = 2500L;
     /** Keep the microphone uplink disabled while the local ack is audible. */
     private static final long WAKE_ACK_GUARD_MS = 1100L;
+    /** RMS below this counts as silence when gating the post-wake listen start. */
+    private static final int WAKE_SILENCE_RMS_THRESHOLD = 150;
+    /** Consecutive silent 60 ms frames required before the mic counts as quiet. */
+    private static final int WAKE_SILENCE_CONFIRM_FRAMES = 7; // ~420 ms
+    /** The post-wake silence gate never waits longer than this. */
+    private static final long WAKE_SILENCE_MAX_WAIT_MS = 3000L;
 
     /**
      * Auto-listen window: after “小智小智” the user has this long to start
@@ -112,7 +118,7 @@ public class VoiceAssistantService extends Service {
 
     private SettingsStore settings;
     private AudioEngine audioEngine;
-    private WakeWordEngine wakeEngine;
+    private volatile WakeWordEngine wakeEngine;
     private String wakeEngineError;
     private XiaozhiClient client;
     private PowerManager.WakeLock wakeLock;
@@ -136,16 +142,40 @@ public class VoiceAssistantService extends Service {
     private final java.util.Random ackRandom = new java.util.Random();
     private long lastAcceptedWakeElapsedMs = -WAKE_REDETECT_DEBOUNCE_MS;
 
+    private AudioManager audioManager;
+    private boolean focusHeld;
+    /** Gate that delays the post-wake listen until the mic is quiet (echo tail). */
+    private volatile boolean wakeSilenceGating;
+    /** Set once the environment has been silent for a confirm window. */
+    private volatile boolean silenceOnsetReached;
+    /** Consecutive silent frames; only touched on the capture thread. */
+    private int consecutiveSilentFrames;
+    /** Frames captured after the environment went quiet; safe to replay. */
+    private final ArrayDeque<byte[]> cleanRing = new ArrayDeque<>();
+    private long wakeGateDeadlineMs;
+
     private final AudioEngine.FrameConsumer uplinkConsumer = new AudioEngine.FrameConsumer() {
         @Override
         public void onFrame(byte[] data) {
             synchronized (preRollLock) {
-                boolean capturePreRoll = !wakeAckPlaying
-                        && (!isAutoListening() || autoListenReady);
-                if (capturePreRoll) {
-                    preRoll.addLast(data);
-                    while (preRoll.size() > PRE_ROLL_CAPACITY) {
-                        preRoll.pollFirst();
+                if (wakeSilenceGating) {
+                    // During the post-wake silence gate only frames captured
+                    // after the environment went quiet are usable uplink audio;
+                    // everything else is the tail of an interrupted reply.
+                    if (silenceOnsetReached) {
+                        cleanRing.addLast(data);
+                        while (cleanRing.size() > PRE_ROLL_CAPACITY) {
+                            cleanRing.pollFirst();
+                        }
+                    }
+                } else {
+                    boolean capturePreRoll = !wakeAckPlaying
+                            && (!isAutoListening() || autoListenReady);
+                    if (capturePreRoll) {
+                        preRoll.addLast(data);
+                        while (preRoll.size() > PRE_ROLL_CAPACITY) {
+                            preRoll.pollFirst();
+                        }
                     }
                 }
             }
@@ -166,17 +196,23 @@ public class VoiceAssistantService extends Service {
     private final AudioEngine.PcmFrameConsumer pcmTap = new AudioEngine.PcmFrameConsumer() {
         @Override
         public void onPcmFrame(short[] samples) {
-            trackAutoListenSpeech(samples);
+            double rms = computeRms(samples);
+            trackAutoListenSpeech(rms);
+            updateWakeSilenceGate(rms);
             diagPcmStats(samples);
             WakeWordEngine engine = wakeEngine;
-            boolean wakeArmed;
-            boolean speaking;
+            boolean xiaozhiArmed;
+            boolean xiaoaiArmed;
             synchronized (lock) {
-                wakeArmed = state == State.IDLE;
-                speaking = state == State.SPEAKING;
+                // Xiaozhi phrases may start a session from IDLE or barge in
+                // while SPEAKING; the XiaoAi phrase stays armed in every other
+                // state (including XIAOZHI_LISTENING) so the stock assistant
+                // always wins immediately and the running session yields.
+                xiaozhiArmed = state == State.IDLE || state == State.SPEAKING;
+                xiaoaiArmed = xiaozhiArmed || state == State.XIAOZHI_LISTENING;
             }
             if (engine == null || !settings.isWakeEnabled() || wakeAckPlaying
-                    || (!wakeArmed && !speaking)) {
+                    || !xiaoaiArmed) {
                 return;
             }
             String keyword;
@@ -208,24 +244,39 @@ public class VoiceAssistantService extends Service {
             }
             lastAcceptedWakeElapsedMs = now;
             if (WakeWordEngine.KEYWORD_XIAOZHI.equals(keyword)) {
+                if (!xiaozhiArmed) {
+                    // Already inside a Xiaozhi session; a repeated phrase while
+                    // SPEAKING is handled by the barge-in path, not here.
+                    return;
+                }
                 synchronized (lock) {
-                    if (wakeDispatchPending || (state != State.IDLE && state != State.SPEAKING)) {
+                    if (wakeDispatchPending) {
                         return;
                     }
                     wakeDispatchPending = true;
                 }
                 mainHandler.post(wakeXiaozhiRunnable);
             } else if (WakeWordEngine.KEYWORD_XIAOAI.equals(keyword)) {
+                synchronized (lock) {
+                    if (wakeDispatchPending) {
+                        return;
+                    }
+                    wakeDispatchPending = true;
+                }
                 mainHandler.post(wakeXiaoaiRunnable);
             }
         }
 
-        private void trackAutoListenSpeech(short[] samples) {
+        private double computeRms(short[] samples) {
             long sum = 0;
             for (short s : samples) {
                 sum += (long) s * s;
             }
-            if (Math.sqrt(sum / (double) samples.length) < SPEECH_ENERGY_THRESHOLD) {
+            return Math.sqrt(sum / (double) samples.length);
+        }
+
+        private void trackAutoListenSpeech(double rms) {
+            if (rms < SPEECH_ENERGY_THRESHOLD) {
                 return;
             }
             synchronized (lock) {
@@ -238,6 +289,23 @@ public class VoiceAssistantService extends Service {
                 mainHandler.removeCallbacks(followUpTimeoutRunnable);
             }
             mainHandler.removeCallbacks(autoListenTimeoutRunnable);
+        }
+
+        /** Capture thread: silence detection for the post-wake listen gate. */
+        private void updateWakeSilenceGate(double rms) {
+            if (!wakeSilenceGating) {
+                return;
+            }
+            if (rms < WAKE_SILENCE_RMS_THRESHOLD) {
+                consecutiveSilentFrames++;
+                if (!silenceOnsetReached
+                        && consecutiveSilentFrames >= WAKE_SILENCE_CONFIRM_FRAMES) {
+                    silenceOnsetReached = true;
+                    mainHandler.post(wakeGateCompleteRunnable);
+                }
+            } else {
+                consecutiveSilentFrames = 0;
+            }
         }
 
         // Temporary diagnostics: log mic energy once per second so we can tell
@@ -317,10 +385,31 @@ public class VoiceAssistantService extends Service {
         }
     };
 
+    private final Runnable wakeGateTickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!wakeSilenceGating) {
+                return;
+            }
+            if (SystemClock.elapsedRealtime() >= wakeGateDeadlineMs) {
+                completeWakeSilenceGate();
+                return;
+            }
+            mainHandler.postDelayed(this, 100L);
+        }
+    };
+
+    private final Runnable wakeGateCompleteRunnable = new Runnable() {
+        @Override
+        public void run() {
+            completeWakeSilenceGate();
+        }
+    };
+
     private final Runnable delayedAutoListenRunnable = new Runnable() {
         @Override
         public void run() {
-            beginAutoListen(false);
+            beginAutoListen(null);
         }
     };
 
@@ -493,8 +582,17 @@ public class VoiceAssistantService extends Service {
 
         @Override
         public void onAudio(byte[] data) {
-            // AudioTrack work is already isolated by AudioEngine; enqueue from
-            // the socket callback without mutating service state here.
+            // Only the active reply may produce sound: binary frames that race
+            // with an abort/barge-in must never restart playback, otherwise
+            // the interrupted TTS keeps talking (each playOpus call would
+            // spin up a fresh playback session after stopPlayback).
+            State current;
+            synchronized (lock) {
+                current = state;
+            }
+            if (current != State.SPEAKING) {
+                return;
+            }
             audioEngine.playOpus(data);
         }
 
@@ -525,10 +623,18 @@ public class VoiceAssistantService extends Service {
             wakeLock.setReferenceCounted(false);
             wakeLock.acquire();
         }
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
         audioEngine = new AudioEngine(this, audioCallback);
         client = new XiaozhiClient(settings, clientListener);
-        createWakeEngine();
+        // Model loading blocks for several seconds on this device; run it off
+        // the main thread so the foreground service and UI come up immediately.
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                createWakeEngine();
+            }
+        }, "x08c-kws-init").start();
         ensureRecording();
     }
 
@@ -582,6 +688,7 @@ public class VoiceAssistantService extends Service {
         if (audioEngine != null) {
             audioEngine.close();
         }
+        abandonXiaozhiFocus();
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
@@ -659,11 +766,87 @@ public class VoiceAssistantService extends Service {
         mainHandler.removeCallbacks(delayedAutoListenRunnable);
         mainHandler.removeCallbacks(followUpTimeoutRunnable);
         mainHandler.removeCallbacks(autoListenTimeoutRunnable);
+        mainHandler.removeCallbacks(wakeGateTickRunnable);
+        mainHandler.removeCallbacks(wakeGateCompleteRunnable);
+        wakeSilenceGating = false;
         synchronized (lock) {
             pendingAutoListen = false;
             autoListenReady = false;
             followUpListening = false;
         }
+    }
+
+    // ------------------------------------------------------------ audio focus
+
+    private final AudioManager.OnAudioFocusChangeListener focusChangeListener =
+            new AudioManager.OnAudioFocusChangeListener() {
+                @Override
+                public void onAudioFocusChange(int change) {
+                    if (change == AudioManager.AUDIOFOCUS_LOSS
+                            || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+                            || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+                        focusHeld = false;
+                        mainHandler.post(externalFocusLossRunnable);
+                    }
+                }
+            };
+
+    private final Runnable externalFocusLossRunnable = new Runnable() {
+        @Override
+        public void run() {
+            handleExternalFocusLoss();
+        }
+    };
+
+    /**
+     * Take the speaker away from the stock assistant / media while Xiaozhi is
+     * answering; a stock XiaoAi TTS in progress is paused by the system and
+     * its session is cancelled, so it cannot answer a Xiaozhi command.
+     */
+    private void requestXiaozhiFocus() {
+        if (focusHeld || audioManager == null) {
+            return;
+        }
+        int result = audioManager.requestAudioFocus(
+                focusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+        focusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
+    private void abandonXiaozhiFocus() {
+        if (!focusHeld || audioManager == null) {
+            return;
+        }
+        audioManager.abandonAudioFocus(focusChangeListener);
+        focusHeld = false;
+    }
+
+    /** Another component (stock XiaoAi, music) took the speaker: stop our turn. */
+    private void handleExternalFocusLoss() {
+        if (destroyed) {
+            return;
+        }
+        State current;
+        synchronized (lock) {
+            current = state;
+        }
+        if (current != State.SPEAKING && current != State.XIAOZHI_LISTENING
+                && current != State.MANUAL_LISTENING) {
+            return;
+        }
+        Log.i(TAG, "audio focus lost; stopping the active Xiaozhi turn");
+        cancelAutoSession();
+        stopWakeAck();
+        audioEngine.stopPlayback();
+        if (client != null) {
+            client.stopListening();
+            if (client.isReady()) {
+                client.abort();
+            }
+        }
+        setState(State.IDLE);
+        scheduleIdleReturn();
     }
 
     public void disconnectClient() {
@@ -739,6 +922,7 @@ public class VoiceAssistantService extends Service {
     public void interruptSession() {
         cancelIdleReturn();
         cancelAutoSession();
+        abandonXiaozhiFocus();
         audioEngine.stopPlayback();
         if (client != null) {
             client.stopListening();
@@ -773,8 +957,19 @@ public class VoiceAssistantService extends Service {
     /** Builds the wake word engine; recording still works if this fails. */
     private void createWakeEngine() {
         try {
-            wakeEngine = new SherpaWakeWordEngine(this);
-            wakeEngineError = null;
+            WakeWordEngine engine = new SherpaWakeWordEngine(this);
+            synchronized (lock) {
+                if (destroyed) {
+                    try {
+                        engine.close();
+                    } catch (RuntimeException ignored) {
+                        // Release is best effort during teardown.
+                    }
+                    return;
+                }
+                wakeEngine = engine;
+                wakeEngineError = null;
+            }
             Log.i(TAG, "Wake word engine initialized");
         } catch (RuntimeException | LinkageError error) {
             wakeEngine = null;
@@ -812,6 +1007,9 @@ public class VoiceAssistantService extends Service {
     private void handleXiaozhiWake() {
         cancelIdleReturn();
         showAssistantUi();
+        // Pause the stock assistant (its TTS and listening session) before
+        // starting our own, regardless of which side was speaking.
+        requestXiaozhiFocus();
         synchronized (lock) {
             if (state == State.NATIVE_ACTIVE || state == State.MANUAL_LISTENING
                     || state == State.XIAOZHI_LISTENING) {
@@ -835,7 +1033,10 @@ public class VoiceAssistantService extends Service {
         }
         playWakeAck();
         if (client != null && client.isReady()) {
-            scheduleAutoListen(true);
+            // Delay the listen start until the microphone is quiet: neither
+            // our own acknowledgment echo nor the tail of an interrupted
+            // XiaoAi answer may reach the ASR.
+            startWakeSilenceGate();
         } else if (client != null) {
             synchronized (lock) {
                 pendingAutoListen = true;
@@ -854,23 +1055,32 @@ public class VoiceAssistantService extends Service {
     /**
      * Starts an auto (server-VAD) listen session.
      *
-     * @param flushPreRoll replay the captured pre-roll tail so speech spoken
-     *     immediately after the wake word is not clipped; only safe when the
-     *     connection was already up at wake time — after a reconnect the
-     *     buffered audio is stale and would truncate the fresh session.
+     * @param flushFrames optional audio captured after the environment went
+     *     quiet; replayed right after the listen start so the first words are
+     *     not clipped. Null when nothing clean was captured (gate timeout or
+     *     a reconnect, where buffered audio would be stale).
      */
-    private void beginAutoListen(boolean flushPreRoll) {
+    private void beginAutoListen(ArrayDeque<byte[]> flushFrames) {
         synchronized (lock) {
             if (state != State.XIAOZHI_LISTENING || destroyed) {
                 return;
             }
         }
+        if (client == null || !client.isReady()) {
+            synchronized (lock) {
+                pendingAutoListen = true;
+            }
+            return;
+        }
         wakeAckPlaying = false;
         autoListenReady = false;
         client.startListening(XiaozhiClient.LISTEN_MODE_AUTO);
         autoListenReady = true;
-        if (flushPreRoll) {
-            flushPreRoll();
+        if (flushFrames != null && !flushFrames.isEmpty()) {
+            XiaozhiClient current = client;
+            for (byte[] frame : flushFrames) {
+                current.sendAudio(frame);
+            }
         }
         synchronized (lock) {
             autoListenHeardSpeech = false;
@@ -880,13 +1090,42 @@ public class VoiceAssistantService extends Service {
         setState(State.XIAOZHI_LISTENING);
     }
 
-    private void scheduleAutoListen(final boolean flushPreRoll) {
-        mainHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                beginAutoListen(flushPreRoll);
-            }
-        }, WAKE_ACK_GUARD_MS);
+    /**
+     * Arms the post-wake silence gate: the listen session starts only after
+     * the microphone has been quiet for a short window, so neither our own
+     * acknowledgment echo nor the tail of an interrupted reply reaches the
+     * server ASR.
+     */
+    private void startWakeSilenceGate() {
+        synchronized (preRollLock) {
+            preRoll.clear();
+            cleanRing.clear();
+        }
+        silenceOnsetReached = false;
+        consecutiveSilentFrames = 0;
+        wakeSilenceGating = true;
+        wakeGateDeadlineMs = SystemClock.elapsedRealtime() + WAKE_SILENCE_MAX_WAIT_MS;
+        mainHandler.removeCallbacks(wakeGateCompleteRunnable);
+        mainHandler.removeCallbacks(wakeGateTickRunnable);
+        mainHandler.postDelayed(wakeGateTickRunnable, 100L);
+        Log.i(TAG, "wake silence gate armed");
+    }
+
+    /** Main thread: the environment is quiet (or the gate timed out) — start listening. */
+    private void completeWakeSilenceGate() {
+        if (!wakeSilenceGating) {
+            return;
+        }
+        wakeSilenceGating = false;
+        mainHandler.removeCallbacks(wakeGateTickRunnable);
+        ArrayDeque<byte[]> clean;
+        synchronized (preRollLock) {
+            clean = new ArrayDeque<>(cleanRing);
+            cleanRing.clear();
+            preRoll.clear();
+        }
+        Log.i(TAG, "wake silence gate completed, cleanFrames=" + clean.size());
+        beginAutoListen(clean.isEmpty() ? null : clean);
     }
 
     private void startFollowUpListen() {
@@ -894,6 +1133,9 @@ public class VoiceAssistantService extends Service {
             scheduleIdleReturn();
             return;
         }
+        // No playback happens during the follow-up window; release the speaker
+        // so the stock assistant can answer immediately if called.
+        abandonXiaozhiFocus();
         followUpListening = true;
         autoListenReady = false;
         client.startListening(XiaozhiClient.LISTEN_MODE_AUTO);
@@ -913,6 +1155,7 @@ public class VoiceAssistantService extends Service {
         }
         followUpListening = false;
         autoListenReady = false;
+        abandonXiaozhiFocus();
         if (client != null) {
             client.stopListening();
         }
@@ -925,6 +1168,7 @@ public class VoiceAssistantService extends Service {
         followUpListening = false;
         autoListenReady = false;
         mainHandler.removeCallbacks(followUpTimeoutRunnable);
+        abandonXiaozhiFocus();
         if (client != null) {
             client.stopListening();
             if (client.isReady()) {
@@ -1006,6 +1250,7 @@ public class VoiceAssistantService extends Service {
                 return;
             }
         }
+        abandonXiaozhiFocus();
         if (client != null) {
             client.stopListening();
         }
@@ -1014,42 +1259,37 @@ public class VoiceAssistantService extends Service {
         notifyInfo("没有听到讲话，已返回待机；请说“小智小智”唤醒");
     }
 
-    /** Must run before {@code setState(XIAOZHI_LISTENING)} so live frames are still dropped. */
-    private void flushPreRoll() {
-        XiaozhiClient current = client;
-        if (current == null) {
-            return;
-        }
-        ArrayDeque<byte[]> snapshot;
-        synchronized (preRollLock) {
-            snapshot = new ArrayDeque<>(preRoll);
-            preRoll.clear();
-        }
-        // The ring was cleared at detection time, so it only contains speech
-        // captured after the wake keyword.
-        for (byte[] frame : snapshot) {
-            current.sendAudio(frame);
-        }
-    }
-
     /** Called on the main thread after “小爱同学” is detected. */
     private void handleXiaoaiWake() {
         cancelIdleReturn();
         showIdleScreen();
         stopWakeAck();
         synchronized (lock) {
-            if (state == State.NATIVE_ACTIVE) {
-                return;
-            }
+            wakeDispatchPending = false;
             pendingAutoListen = false;
         }
+        // Cancel a pending post-wake listen gate: the session that was about
+        // to start must not begin after yielding to the stock assistant.
+        wakeSilenceGating = false;
+        mainHandler.removeCallbacks(wakeGateTickRunnable);
+        mainHandler.removeCallbacks(wakeGateCompleteRunnable);
+        // Hand the speaker back so the stock assistant can answer immediately.
+        abandonXiaozhiFocus();
         // Yield to the stock assistant: stop our playback and uplink, abort the
-        // server turn, but keep the shared capture stream running.
+        // server turn, but keep the shared capture stream running. This runs
+        // from any Xiaozhi state (IDLE / SPEAKING / XIAOZHI_LISTENING) so a
+        // running session never keeps answering once its command belongs to
+        // the other assistant.
         audioEngine.stopPlayback();
         if (client != null) {
             client.stopListening();
             if (client.isReady()) {
                 client.abort();
+            }
+        }
+        synchronized (lock) {
+            if (state == State.NATIVE_ACTIVE) {
+                return;
             }
         }
         mainHandler.removeCallbacks(exitNativeRunnable);

@@ -545,6 +545,35 @@ public final class AudioEngine implements AutoCloseable {
                     record = null;
                     continue;
                 }
+                // Echo cancellation is essential for barge-in: without it the
+                // KWS hears the speaker's own TTS echo and cannot spot a wake
+                // word spoken while the reply is playing. Best effort — some
+                // devices lack a usable AEC and we fall back to raw capture.
+                if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                    try {
+                        android.media.audiofx.AcousticEchoCanceler aec =
+                                android.media.audiofx.AcousticEchoCanceler.create(
+                                        record.getAudioSessionId());
+                        if (aec != null) {
+                            aec.setEnabled(true);
+                            safeInfo("已启用声学回声消除 (AEC)");
+                        }
+                    } catch (RuntimeException error) {
+                        safeError("AEC 启用失败: " + usefulMessage(error));
+                    }
+                }
+                if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                    try {
+                        android.media.audiofx.NoiseSuppressor ns =
+                                android.media.audiofx.NoiseSuppressor.create(
+                                        record.getAudioSessionId());
+                        if (ns != null) {
+                            ns.setEnabled(true);
+                        }
+                    } catch (RuntimeException error) {
+                        safeError("噪声抑制启用失败: " + usefulMessage(error));
+                    }
+                }
                 record.startRecording();
                 if (record.getRecordingState()
                         != AudioRecord.RECORDSTATE_RECORDING) {
